@@ -1,0 +1,25 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Сохранённый сигнал о пампе альткоина
+model PumpSignal {
+  id          String   @id // uuid события из pump-service
+  symbol      String // пара, например SOLUSDT
+  base        String // базовая монета, например SOL
+  changePct   Float // процент роста за окно
+  price       Float // текущая цена на момент сигнала
+  refPrice    Float // цена N минут назад
+  windowSec   Int // окно детекции в секундах
+  quoteVol24h Float? // объём торгов за 24ч в USDT
+  kind        String // 'pump' | 'strong'
+  message     String // готовое текстовое сообщение о скачке
+  detectedAt  DateTime @default(now()) // время обнаружения
+
+  @@index([detectedAt])
+}
