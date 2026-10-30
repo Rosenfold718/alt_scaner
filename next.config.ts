@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  /* config options here */
+  // instrumentation.ts автостартует ядро-сканер (pump-service, порт 3003) вместе с сервером
   typescript: {
     ignoreBuildErrors: true,
   },

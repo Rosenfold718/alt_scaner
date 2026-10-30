@@ -8,7 +8,9 @@
  *   • Для каждой USDT-пары ведётся скользящее окно цены (по умолчанию 5 минут).
  *   • Рост = (текущая цена − цена ~5 минут назад) / цена 5 минут назад × 100%.
  *   • Рост ≥ minPct → сигнал «ПАМП»; рост > maxPct → сигнал с меткой «СИЛЬНЫЙ ПАМП».
- *   • Повторный сигнал по той же монете — не чаще, чем раз в 3 минуты (кулдаун).
+ *   • Один сигнал на эпизод роста: пока монета держится выше нижнего порога, повторов нет.
+ *     Новый сигнал возможен только после того, как рост откатится ниже порога и продержится
+ *     там REARM_HOLD_MS (30 с) — плюс антиспам-кулдаун 3 минуты от дребезга у порога.
  *   • На старте окно мгратно заполняется историями 1-секундных свечей (REST klines),
  *     поэтому сканер начинает ловить пампы сразу, без 5-минутного прогрева.
  */
@@ -92,7 +94,8 @@ const CONFIG: EngineConfig = { minPct: 3, maxPct: 10, windowSec: 300 };
 const MIN_WINDOW_SEC = 60;
 const MAX_WINDOW_SEC = 3600;
 
-const COOLDOWN_MS = 3 * 60_000; // повторный сигнал по монете не чаще раза в 3 минуты
+const COOLDOWN_MS = 3 * 60_000; // антиспам: защита от дребезга сигналов у самого порога
+const REARM_HOLD_MS = 30_000; // сколько рост должен продержаться ниже порога, чтобы монета «разрядилась»
 const KEEP_MARGIN_MS = 30_000; // запас глубины буфера поверх окна
 const SYMBOLS_REFRESH_MS = 10 * 60_000; // период обновления списка торговых пар
 const STALE_WS_MS = 20_000; // нет данных столько — считаем поток мёртвым
@@ -121,6 +124,10 @@ let tracked = new Map<string, SymbolInfo>();
 const buffers = new Map<string, Array<{ t: number; p: number }>>();
 const quoteVol = new Map<string, number>();
 const lastAlertAt = new Map<string, number>();
+// Анти-повтор: монеты, по которым сигнал уже отправлен и чей рост всё ещё держится выше
+// нижнего порога. pumpingBelowSince — с какого момента рост монеты держится ниже порога.
+const pumping = new Set<string>();
+const pumpingBelowSince = new Map<string, number>();
 
 const history: PumpEvent[] = [];
 
@@ -264,6 +271,8 @@ async function loadSymbols(): Promise<boolean> {
           buffers.delete(key);
           quoteVol.delete(key);
           lastAlertAt.delete(key);
+          pumping.delete(key);
+          pumpingBelowSince.delete(key);
         }
       }
       const added = [...fresh.keys()].filter((k) => !tracked.has(k));
@@ -450,11 +459,30 @@ function detectPump(sym: string, nowMs: number): void {
 
   const price = buf[buf.length - 1].p;
   const changePct = ((price - refPrice) / refPrice) * 100;
+
+  // Анти-повтор: один сигнал на эпизод роста. Если по монете уже был сигнал и её рост
+  // всё ещё держится выше нижнего порога — новых сигналов нет. Монета «разряжается»,
+  // только когда рост продержится ниже minPct дольше REARM_HOLD_MS.
+  if (pumping.has(sym)) {
+    if (changePct >= CONFIG.minPct) {
+      pumpingBelowSince.delete(sym);
+      return;
+    }
+    const belowSince = pumpingBelowSince.get(sym) ?? nowMs;
+    if (nowMs - belowSince < REARM_HOLD_MS) {
+      pumpingBelowSince.set(sym, belowSince);
+      return;
+    }
+    pumping.delete(sym);
+    pumpingBelowSince.delete(sym);
+  }
+
   if (changePct < CONFIG.minPct) return;
 
   const last = lastAlertAt.get(sym) ?? 0;
   if (nowMs - last < COOLDOWN_MS) return;
   lastAlertAt.set(sym, nowMs);
+  pumping.add(sym);
 
   const kind: PumpKind = changePct > CONFIG.maxPct ? 'strong' : 'pump';
   const rounded = Math.round(changePct * 100) / 100;
